@@ -1,0 +1,68 @@
+# Python / Virtual Environment
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Testing & Linting
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+
+# Data Files & Output Artefacts (DO NOT TRACK LARGE DATA / PREDICTIONS)
+dataset/
+*.tsv
+*.csv
+*.parquet
+output/
+matching_results.tsv
+candidate_pairs.tsv
+
+# Model Checkpoints & Serialization
+*.pt
+*.pth
+*.onnx
+*.bin
+*.pkl
+*.joblib
+*.model
+
+# IDE / Editor Files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS Generated Files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Environment / Secrets
+.env
+.env.*
