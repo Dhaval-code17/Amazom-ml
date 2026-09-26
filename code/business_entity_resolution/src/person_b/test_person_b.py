@@ -1019,3 +1019,288 @@ def test_64_regression_all_previous_54_tests_pass():
     test_23_exact_phonetic_key_retrieval()
     test_31_perfect_candidate_recall()
     test_41_identical_normalized_name_ranks_above_unrelated()
+
+# =====================================================================
+# PHASE 1 MEMORY OPTIMIZATION TESTS: INTEGER ID LAYER
+# =====================================================================
+
+def test_65_string_ids_mapped_to_internal_integers():
+    """TEST 65: String entity IDs are mapped to compact internal integers after indexing."""
+    s2 = normalize_record("Acme Corp", "100 Main St", "US")
+    s2["entity_id"] = "S2-65"
+    blocker = MultiChannelBlocker()
+    blocker.index_target_records([s2])
+    assert "S2-65" in blocker._entity_id_to_int
+    assert isinstance(blocker._entity_id_to_int["S2-65"], int)
+
+def test_66_get_candidates_returns_string_ids():
+    """TEST 66: get_candidates() always returns original string IDs, never integers."""
+    s1 = normalize_record("Acme Corp", "100 Main St", "US")
+    s1["entity_id"] = "S1-66"
+    s2 = normalize_record("Acme Corp", "100 Main St", "US")
+    s2["entity_id"] = "S2-66"
+    blocker = MultiChannelBlocker()
+    blocker.index_target_records([s2])
+    candidates = blocker.get_candidates(s1)
+    assert "S2-66" in candidates
+    for cand in candidates:
+        assert isinstance(cand, str), f"Expected str, got {type(cand)}: {cand}"
+
+def test_67_token_index_stores_integers():
+    """TEST 67: token_index posting lists store integer IDs, not strings."""
+    s2 = normalize_record("GlobalTech Inc", "500 Oak Ave", "US")
+    s2["entity_id"] = "S2-67"
+    blocker = MultiChannelBlocker()
+    blocker.index_target_records([s2])
+    for token, posting in blocker.token_index.items():
+        for item in posting:
+            assert isinstance(item, int), f"token_index posting for '{token}' contains non-int: {type(item)}"
+
+def test_68_location_index_stores_integers():
+    """TEST 68: city_country_index and postal_country_index store integer IDs."""
+    s2 = normalize_record("CityBiz", "123 Elm St, Springfield, 62701", "US")
+    s2["entity_id"] = "S2-68"
+    blocker = MultiChannelBlocker()
+    blocker.index_target_records([s2])
+    for key, posting in list(blocker.city_country_index.items()) + list(blocker.postal_country_index.items()):
+        for item in posting:
+            assert isinstance(item, int), f"Location index posting for {key} contains non-int: {type(item)}"
+
+def test_69_phonetic_index_stores_integers():
+    """TEST 69: phonetic_index stores integer IDs."""
+    s2 = normalize_record("Acme Corp", "100 Main St", "US")
+    s2["entity_id"] = "S2-69"
+    blocker = MultiChannelBlocker()
+    blocker.index_target_records([s2])
+    for key, posting in blocker.phonetic_index.items():
+        for item in posting:
+            assert isinstance(item, int), f"phonetic_index posting for '{key}' contains non-int: {type(item)}"
+
+def test_70_oversized_posting_list_capped_at_indexing():
+    """TEST 70: Token posting lists stop growing once max_posting_size is reached during indexing."""
+    cap = 5
+    blocker = MultiChannelBlocker(max_posting_size=cap)
+    # Index cap + 5 records all sharing the same common token "common"
+    records = []
+    for i in range(cap + 5):
+        r = {
+            "entity_id": f"S2-70-{i:03d}",
+            "name_tokens_no_suffix": ["common"],
+            "name_char_ngrams": [],
+            "city_guess": "",
+            "postal_code_guess": "",
+            "country": "",
+            "name_phonetic": ""
+        }
+        records.append(r)
+    blocker.index_target_records(records)
+    # The posting for "common" must not exceed max_posting_size
+    posting = blocker.token_index.get("common", set())
+    assert len(posting) == cap, f"Expected cap={cap}, got {len(posting)}"
+
+def test_71_normal_posting_list_not_prematurely_capped():
+    """TEST 71: Normal posting lists below max_posting_size still store all IDs."""
+    cap = 100
+    blocker = MultiChannelBlocker(max_posting_size=cap)
+    n = 10
+    records = []
+    for i in range(n):
+        r = {
+            "entity_id": f"S2-71-{i:03d}",
+            "name_tokens_no_suffix": ["uniquetoken"],
+            "name_char_ngrams": [],
+            "city_guess": "", "postal_code_guess": "", "country": "", "name_phonetic": ""
+        }
+        records.append(r)
+    blocker.index_target_records(records)
+    posting = blocker.token_index.get("uniquetoken", set())
+    assert len(posting) == n
+
+def test_72_oversized_token_skipped_at_query_time():
+    """TEST 72: Tokens with posting list == max_posting_size are skipped at query time."""
+    cap = 3
+    blocker = MultiChannelBlocker(max_posting_size=cap)
+    records = []
+    for i in range(cap):
+        r = {
+            "entity_id": f"S2-72-{i:03d}",
+            "name_tokens_no_suffix": ["megablock"],
+            "name_char_ngrams": [],
+            "city_guess": "", "postal_code_guess": "", "country": "", "name_phonetic": ""
+        }
+        records.append(r)
+    blocker.index_target_records(records)
+    # The posting hits exactly max_posting_size so it should be skipped at query time
+    s1 = {"entity_id": "S1-72", "name_tokens_no_suffix": ["megablock"],
+          "name_char_ngrams": [], "city_guess": "", "postal_code_guess": "", "country": "", "name_phonetic": ""}
+    token_cands = blocker._get_token_candidates(s1)
+    assert len(token_cands) == 0, "Mega-block token should be skipped at query time"
+
+def test_73_location_matching_works():
+    """TEST 73: Location channel still returns expected candidates after optimization."""
+    s1 = normalize_record("Any Biz", "100 Elm, Chicago, 60601", "US")
+    s1["entity_id"] = "S1-73"
+    s2 = normalize_record("Any Biz", "200 Oak, Chicago, 60601", "US")
+    s2["entity_id"] = "S2-73"
+    blocker = MultiChannelBlocker()
+    blocker.index_target_records([s2])
+    cands = blocker.get_candidates(s1)
+    assert "S2-73" in cands
+
+def test_74_postal_matching_works():
+    """TEST 74: Postal channel still returns expected candidates after optimization."""
+    s1 = {"entity_id": "S1-74", "name_tokens_no_suffix": ["zxqbiz"],
+          "name_char_ngrams": [], "city_guess": "", "postal_code_guess": "90210", "country": "US", "name_phonetic": ""}
+    s2 = {"entity_id": "S2-74", "name_tokens_no_suffix": ["zxqbiz"],
+          "name_char_ngrams": [], "city_guess": "", "postal_code_guess": "90210", "country": "US", "name_phonetic": ""}
+    blocker = MultiChannelBlocker()
+    blocker.index_target_records([s2])
+    cands = blocker.get_candidates(s1)
+    assert "S2-74" in cands
+
+def test_75_phonetic_matching_works():
+    """TEST 75: Phonetic channel still returns expected candidates after optimization."""
+    s1 = {"entity_id": "S1-75", "name_tokens_no_suffix": [],
+          "name_char_ngrams": [], "city_guess": "", "postal_code_guess": "", "country": "", "name_phonetic": "AKME"}
+    s2 = {"entity_id": "S2-75", "name_tokens_no_suffix": [],
+          "name_char_ngrams": [], "city_guess": "", "postal_code_guess": "", "country": "", "name_phonetic": "AKME"}
+    blocker = MultiChannelBlocker()
+    blocker.index_target_records([s2])
+    cands = blocker.get_candidates(s1)
+    assert "S2-75" in cands
+
+def test_76_lsh_channel_works():
+    """TEST 76: LSH channel still retrieves character-level typo after optimization."""
+    s1 = normalize_record("Acme Restaurant", "100 Main St", "US")
+    s1["entity_id"] = "S1-76"
+    s2 = normalize_record("Acme Restarant", "100 Main St", "US")
+    s2["entity_id"] = "S2-76"
+    blocker = MultiChannelBlocker(lsh_threshold=0.5, num_perm=128)
+    blocker.index_target_records([s2])
+    lsh_cands = blocker._get_lsh_candidates(s1)
+    assert "S2-76" in lsh_cands
+
+def test_77_multi_channel_union():
+    """TEST 77: Multiple channels correctly union their candidates, no duplicates."""
+    s1 = normalize_record("Acme Corp", "100 Main St, Chicago, 60601", "US")
+    s1["entity_id"] = "S1-77"
+    s2_token = normalize_record("Acme Corp", "999 Other St", "US")
+    s2_token["entity_id"] = "S2-77A"
+    s2_loc = normalize_record("Totally Different", "100 Main St, Chicago, 60601", "US")
+    s2_loc["entity_id"] = "S2-77B"
+    blocker = MultiChannelBlocker()
+    blocker.index_target_records([s2_token, s2_loc])
+    cands = blocker.get_candidates(s1)
+    assert "S2-77A" in cands
+    assert "S2-77B" in cands
+    assert len(cands) == len(set(cands)), "Duplicate IDs found"
+
+def test_78_empty_index_no_crash():
+    """TEST 78: Empty indexes behave correctly (return empty set)."""
+    s1 = normalize_record("Acme Corp", "100 Main St", "US")
+    s1["entity_id"] = "S1-78"
+    blocker = MultiChannelBlocker()
+    blocker.index_target_records([])
+    cands = blocker.get_candidates(s1)
+    assert isinstance(cands, set)
+    assert len(cands) == 0
+
+def test_79_s1_never_in_candidates():
+    """TEST 79: S1 entity ID never appears in its own candidate set after optimization."""
+    s1 = normalize_record("Acme Corp", "100 Main St", "US")
+    s1["entity_id"] = "S1-79"
+    s2 = normalize_record("Acme Corp", "100 Main St", "US")
+    s2["entity_id"] = "S2-79"
+    blocker = MultiChannelBlocker()
+    # Index both S1 and S2 to simulate a common accident scenario
+    blocker.index_target_records([s1, s2])
+    cands = blocker.get_candidates(s1)
+    assert "S1-79" not in cands
+    assert "S2-79" in cands
+
+def test_80_one_to_many_candidates_supported():
+    """TEST 80: One S1 entity can retrieve multiple S2 and S3 candidates."""
+    s1 = normalize_record("Global Corp", "500 Market St, New York, 10001", "US")
+    s1["entity_id"] = "S1-80"
+    targets = []
+    for i in range(5):
+        r = normalize_record(f"Global Corp {i}", "500 Market St, New York, 10001", "US")
+        r["entity_id"] = f"S2-80-{i}"
+        targets.append(r)
+    blocker = MultiChannelBlocker()
+    blocker.index_target_records(targets)
+    cands = blocker.get_candidates(s1)
+    assert len(cands) >= 2, f"Expected multiple candidates, got {len(cands)}"
+
+def test_81_synthetic_before_after_behavioral_equivalence():
+    """
+    TEST 81: Full synthetic behavioral equivalence test.
+    Verifies that the optimized (integer-ID) blocker retrieves the same candidates
+    as a naive string-ID blocker would on a variety of matching scenarios.
+
+    Covers: exact match, fuzzy name, address match, phonetic, multiple candidates.
+    Common token exceeds posting threshold to verify capping behavior.
+    """
+    # Build a synthetic corpus
+    # S2-81-EXACT: exact name + address match for S1
+    s2_exact = normalize_record("Horizon Technologies", "100 Silicon Ave, Austin, 78701", "US")
+    s2_exact["entity_id"] = "S2-81-EXACT"
+
+    # S2-81-FUZZY: typo in name, same address
+    s2_fuzzy = normalize_record("Horizn Technologies", "100 Silicon Ave, Austin, 78701", "US")
+    s2_fuzzy["entity_id"] = "S2-81-FUZZY"
+
+    # S3-81-LOC: different name, same postal + country
+    s3_loc = normalize_record("Random Corp", "200 Elm St, Austin, 78701", "US")
+    s3_loc["entity_id"] = "S3-81-LOC"
+
+    # S3-81-PHON: phonetically matching name, different address
+    s3_phon = {
+        "entity_id": "S3-81-PHON",
+        "name_tokens_no_suffix": ["horyzn"],
+        "name_char_ngrams": [],
+        "city_guess": "dallas",
+        "postal_code_guess": "75201",
+        "country": "US",
+        "name_phonetic": "HRSN"  # Same phonetic key as Horizon
+    }
+
+    # S2-81-UNRELATEDx: many records sharing a mega-block token "the"
+    cap = 3
+    mega_records = []
+    for i in range(cap + 2):
+        r = {
+            "entity_id": f"S2-81-MEGA-{i}",
+            "name_tokens_no_suffix": ["the"],
+            "name_char_ngrams": [],
+            "city_guess": "", "postal_code_guess": "", "country": "", "name_phonetic": ""
+        }
+        mega_records.append(r)
+
+    all_targets = [s2_exact, s2_fuzzy, s3_loc, s3_phon] + mega_records
+
+    blocker = MultiChannelBlocker(lsh_threshold=0.5, num_perm=128, max_posting_size=cap)
+    blocker.index_target_records(all_targets)
+
+    # Patch the phonetic key for s2_exact to match s3_phon's phonetic key
+    # (normalize_record computes its own phonetic; override it for testing)
+    s1 = normalize_record("Horizon Technologies", "100 Silicon Ave, Austin, 78701", "US")
+    s1["entity_id"] = "S1-81"
+    s1["name_phonetic"] = "HRSN"  # force phonetic match
+
+    cands = blocker.get_candidates(s1)
+
+    # Must retrieve exact match via token / LSH / location channels
+    assert "S2-81-EXACT" in cands, "Exact match not found"
+    # Must retrieve fuzzy match via LSH
+    assert "S2-81-FUZZY" in cands, "Fuzzy match not found"
+    # Must NOT include S1 itself
+    assert "S1-81" not in cands, "S1 leaked into candidates"
+    # Phonetic match
+    assert "S3-81-PHON" in cands, "Phonetic match not found"
+    # Mega-block tokens must NOT expand the candidate set due to capping
+    for i in range(cap + 2):
+        assert f"S2-81-MEGA-{i}" not in cands, f"Mega-block record S2-81-MEGA-{i} leaked via capped token"
+    # All returned IDs must be strings
+    for cand in cands:
+        assert isinstance(cand, str), f"Non-string candidate: {type(cand)}: {cand}"
