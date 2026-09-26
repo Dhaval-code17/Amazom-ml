@@ -38,11 +38,14 @@ def golden_match(s1_record: Dict[str, Any], candidate_record: Dict[str, Any]) ->
     if rule1:
         return True
 
-    # Rule 2: Aggressive name match AND Postal code equal AND non-null/non-empty
+    # Rule 2: Aggressive name match AND Postal code equal AND non-null/non-empty AND Country match
     s1_postal = s1_record.get("postal_code_guess", "")
     cand_postal = candidate_record.get("postal_code_guess", "")
 
-    rule2 = bool(s1_postal) and (s1_postal == cand_postal)
+    rule2 = (
+        bool(s1_postal) and (s1_postal == cand_postal) and
+        bool(s1_country) and (s1_country == cand_country)
+    )
     if rule2:
         return True
 

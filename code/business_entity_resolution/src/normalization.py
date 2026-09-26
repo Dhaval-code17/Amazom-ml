@@ -63,21 +63,40 @@ def _extract_postal_code(address_str: str) -> str:
 
 def _extract_city(address_str: str, tokens: List[str], postal_code: str) -> str:
     """
-    Heuristic/token-based city extraction.
-    Extracts the token/phrase preceding a detected postal code or secondary location token.
+    Heuristic/structure/token-based city extraction.
+    Extracts the chunk/token preceding a detected postal code or secondary location token,
+    using comma-separated address structures when available.
     """
+    if address_str:
+        parts = [p.strip() for p in address_str.split(',') if p.strip()]
+        if len(parts) >= 2:
+            cand = ""
+            if postal_code:
+                for i, part in enumerate(parts):
+                    if postal_code in part and i > 0:
+                        cand = parts[i - 1]
+                        break
+            
+            if not cand:
+                cand = parts[-2]
+                
+            cand = cand.lower().translate(str.maketrans('', '', string.punctuation)).strip()
+            
+            if cand and not any(c.isdigit() for c in cand):
+                if not any(cand.startswith(x) for x in ["unit ", "suite ", "apt ", "apartment ", "block "]):
+                    return cand
+
     if not tokens:
         return ""
     if postal_code and postal_code in tokens:
         idx = tokens.index(postal_code)
         if idx > 0:
-            # Token immediately preceding postal code is usually city
             return tokens[idx - 1]
-    # Fallback heuristic: check last non-numeric token if reasonable
     for token in reversed(tokens):
         if not token.isdigit() and len(token) > 2:
             return token
     return ""
+
 
 def _extract_street_number(tokens: List[str]) -> str:
     """Extract leading numeric token as street number guess."""

@@ -162,3 +162,55 @@ def test_group_kfold_no_leakage():
 
     for train_idx, val_idx in splits:
         assert verify_no_group_leakage(df, train_idx, val_idx, group_col="source1_entity_id") is True
+
+# =====================================================================
+# 5. REGRESSION & SPECIFICATION VERIFICATION TESTS (A - G)
+# =====================================================================
+
+def test_regression_case_a():
+    # Same aggressive name + same address + same country -> MATCH
+    r1 = normalize_record("Acme Corp", "100 Main St", "US")
+    r2 = normalize_record("Acme Inc", "100 Main St", "US")
+    assert golden_match(r1, r2) is True
+
+def test_regression_case_b():
+    # Same aggressive name + same postal code + same country -> MATCH
+    r1 = normalize_record("Acme Corp", "100 Main St, 10001", "US")
+    r2 = normalize_record("Acme Inc", "200 Broadway, 10001", "US")
+    assert golden_match(r1, r2) is True
+
+def test_regression_case_c():
+    # Same name but different address/country -> NOT MATCH
+    r1 = normalize_record("Acme Corp", "100 Main St", "US")
+    r2 = normalize_record("Acme Inc", "200 Broadway", "India")
+    assert golden_match(r1, r2) is False
+
+def test_regression_case_d():
+    # Same name only -> NOT MATCH
+    r1 = normalize_record("Acme Corp", "100 Main St", "US")
+    r2 = normalize_record("Acme Inc", "200 Broadway", "US")
+    assert golden_match(r1, r2) is False
+
+def test_regression_case_e():
+    # Same postal code only -> NOT MATCH
+    r1 = normalize_record("Alpha Corp", "100 Main St, 10001", "US")
+    r2 = normalize_record("Beta Corp", "200 Broadway, 10001", "US")
+    assert golden_match(r1, r2) is False
+
+def test_regression_case_f():
+    # Golden match Rule 2: same aggressive name + same postal code but DIFFERENT country -> FALSE
+    r1 = normalize_record("Acme Corp", "100 Main St, 10001", "US")
+    r2 = normalize_record("Acme Inc", "200 Broadway, 10001", "India")
+    assert golden_match(r1, r2) is False
+
+def test_regression_case_g_city_guess():
+    # Refined city_guess extraction
+    r1 = normalize_record("Test", "1795 Westchester Drive, High Point, NC", "US")
+    assert r1["city_guess"] == "high point"
+
+    r2 = normalize_record("Test", "2100 Cameron Drive, Unit APARTMENT G, Dundalk, MD", "US")
+    assert r2["city_guess"] == "dundalk"
+
+    r3 = normalize_record("Test", "2505, Tower 1, Oakwood, Runwal Greens, Mulund Goreagon Link Road, Near Fortis Hospital, Bhandup West, Mumbai, Maharashtra", "India")
+    assert r3["city_guess"] == "mumbai"
+
