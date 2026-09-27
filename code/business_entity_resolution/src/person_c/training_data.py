@@ -13,7 +13,7 @@ feature generator.
 import sys
 import csv
 from pathlib import Path
-from typing import Dict, List, Set, Union, Any
+from typing import Dict, List, Set, Union, Any, Tuple, Optional
 
 import pandas as pd
 import numpy as np
@@ -23,11 +23,38 @@ if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
 
 from person_c.features import build_pair_features
+from person_c.model import MODEL_FEATURES
 
 
-def _load_ground_truth(filepath: Union[str, Path]) -> Dict[str, Set[str]]:
-    """Reads train_ground_truth.tsv into a Dict mapping S1 ID to a Set of true target IDs."""
-    filepath = Path(filepath)
+def _load_ground_truth(
+    ground_truth: Union[str, Path, Dict[str, Any]]
+) -> Dict[str, Set[str]]:
+    """
+    Reads train_ground_truth.tsv or accepts a dict into a Dict mapping S1 ID to a Set of true target IDs.
+
+    Parameters
+    ----------
+    ground_truth : str, Path, or Dict
+        Filepath to train_ground_truth.tsv or in-memory dict mapping s1_id to matched candidate IDs.
+    """
+    if isinstance(ground_truth, dict):
+        gt_map: Dict[str, Set[str]] = {}
+        for s1_id, val in ground_truth.items():
+            if not s1_id:
+                continue
+            if isinstance(val, set):
+                gt_map[str(s1_id)] = {str(x).strip() for x in val if x}
+            elif isinstance(val, list):
+                gt_map[str(s1_id)] = {str(x).strip() for x in val if x}
+            elif isinstance(val, str):
+                gt_map[str(s1_id)] = {x.strip() for x in val.split(",") if x.strip()}
+            elif val is None:
+                gt_map[str(s1_id)] = set()
+            else:
+                gt_map[str(s1_id)] = {str(val).strip()}
+        return gt_map
+
+    filepath = Path(ground_truth)
     if not filepath.exists():
         raise ValueError(f"Ground truth file not found: {filepath}")
 
@@ -42,7 +69,7 @@ def _load_ground_truth(filepath: Union[str, Path]) -> Dict[str, Set[str]]:
             matched_str = row.get("matched_entity_ids", "")
             if s1_id:
                 if matched_str:
-                    gt_map[s1_id] = {x for x in matched_str.split(",") if x}
+                    gt_map[s1_id] = {x.strip() for x in matched_str.split(",") if x.strip()}
                 else:
                     gt_map[s1_id] = set()
                     
@@ -53,7 +80,7 @@ def build_training_dataset(
     source1_records: List[Dict[str, Any]],
     target_records: List[Dict[str, Any]],
     candidate_pairs: pd.DataFrame,
-    ground_truth_path: Union[str, Path]
+    ground_truth: Union[str, Path, Dict[str, Any]]
 ) -> pd.DataFrame:
     """
     Construct a labeled dataset from candidate pairs.
@@ -63,7 +90,7 @@ def build_training_dataset(
     source1_records : List of normalized S1 dicts.
     target_records : List of normalized target (S2/S3) dicts.
     candidate_pairs : DataFrame with columns 'source1_entity_id' and 'candidate_entity_ids'.
-    ground_truth_path : Path to train_ground_truth.tsv.
+    ground_truth : Path to train_ground_truth.tsv or in-memory dict mapping s1_id to ground truth.
     
     Returns
     -------
@@ -74,11 +101,11 @@ def build_training_dataset(
         raise ValueError("candidate_pairs DataFrame must have 'source1_entity_id' and 'candidate_entity_ids' columns.")
 
     # Build O(1) lookups for records
-    s1_map = {r["entity_id"]: r for r in source1_records if "entity_id" in r}
-    target_map = {r["entity_id"]: r for r in target_records if "entity_id" in r}
+    s1_map = {r["entity_id"]: r for r in source1_records if isinstance(r, dict) and "entity_id" in r}
+    target_map = {r["entity_id"]: r for r in target_records if isinstance(r, dict) and "entity_id" in r}
     
     # Load ground truth map: s1_id -> set of true candidate ids
-    gt_map = _load_ground_truth(ground_truth_path)
+    gt_map = _load_ground_truth(ground_truth)
     
     features_list = []
     
@@ -87,12 +114,20 @@ def build_training_dataset(
 
     for _, row in candidate_pairs.iterrows():
         s1_id = row["source1_entity_id"]
-        cand_ids_str = row["candidate_entity_ids"]
+        cand_ids_val = row["candidate_entity_ids"]
         
-        if not cand_ids_str:
+        if cand_ids_val is None or (isinstance(cand_ids_val, str) and not cand_ids_val.strip()):
             continue
             
-        cand_ids = [c for c in cand_ids_str.split(",") if c]
+        if isinstance(cand_ids_val, list):
+            cand_ids = [str(c).strip() for c in cand_ids_val if c]
+        elif isinstance(cand_ids_val, str):
+            cand_ids = [c.strip() for c in cand_ids_val.split(",") if c.strip()]
+        else:
+            cand_ids = []
+            
+        if not cand_ids:
+            continue
         
         # Validation 1: S1 ID must exist
         if s1_id not in s1_map:
@@ -158,3 +193,41 @@ def build_training_dataset(
         raise ValueError("Infinite values found in the feature matrix.")
         
     return df
+
+
+def extract_X_y_metadata(
+    df: pd.DataFrame
+) -> Tuple[pd.DataFrame, pd.Series, pd.DataFrame]:
+    """
+    Extracts X (45 numeric features), y (binary labels), and metadata (identifiers).
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Dataset produced by build_training_dataset().
+
+    Returns
+    -------
+    X : pd.DataFrame
+        Exactly the 45 numeric model features (excluding identifiers and labels).
+    y : pd.Series
+        Binary label vector (0 or 1).
+    metadata : pd.DataFrame
+        DataFrame with 'source1_entity_id' and 'candidate_entity_id'.
+    """
+    if df.empty:
+        X = pd.DataFrame(columns=MODEL_FEATURES)
+        y = pd.Series(dtype=int, name="label")
+        metadata = pd.DataFrame(columns=["source1_entity_id", "candidate_entity_id"])
+        return X, y, metadata
+
+    for col in MODEL_FEATURES:
+        if col not in df.columns:
+            raise ValueError(f"Required model feature column '{col}' missing from DataFrame.")
+
+    X = df[MODEL_FEATURES].copy()
+    y = df["label"].copy() if "label" in df.columns else pd.Series(dtype=int)
+    metadata = df[["source1_entity_id", "candidate_entity_id"]].copy()
+
+    return X, y, metadata
+

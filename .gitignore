@@ -1,4 +1,6 @@
+# =============================================================
 # Python / Virtual Environment
+# =============================================================
 __pycache__/
 *.py[cod]
 *$py.class
@@ -22,7 +24,9 @@ wheels/
 .installed.cfg
 *.egg
 
+# =============================================================
 # Testing & Linting
+# =============================================================
 .pytest_cache/
 .coverage
 htmlcov/
@@ -30,39 +34,69 @@ htmlcov/
 .nox/
 .hypothesis/
 
+# =============================================================
 # Jupyter Notebooks
+# =============================================================
 .ipynb_checkpoints/
 
-# Data Files & Output Artefacts (DO NOT TRACK LARGE DATA / PREDICTIONS)
+# =============================================================
+# Large Data Files (too big for GitHub — use DVC or store separately)
+# =============================================================
 dataset/
 *.tsv
 *.csv
 *.parquet
-output/
 matching_results.tsv
 candidate_pairs.tsv
 
-# Model Checkpoints & Serialization
+# =============================================================
+# Competition Resource Bundle (large download, not source code)
+# =============================================================
+6ab10eb3b23ba_student_resource/
+
+# =============================================================
+# Model Checkpoints & Serialised Artifacts
+# =============================================================
+production_artifacts/
+*.pkl
+*.joblib
 *.pt
 *.pth
 *.onnx
 *.bin
-*.pkl
-*.joblib
 *.model
+threshold.txt
+model_config.json
 
+# =============================================================
+# Generated Output & Logs
+# =============================================================
+output/
+*.log
+logs/
+
+# =============================================================
 # IDE / Editor Files
+# =============================================================
 .vscode/
 .idea/
 *.swp
 *.swo
 
+# =============================================================
 # OS Generated Files
+# =============================================================
+# macOS
 .DS_Store
+._*
+__MACOSX/
+# Windows
 Thumbs.db
 ehthumbs.db
 Desktop.ini
 
+# =============================================================
 # Environment / Secrets
+# =============================================================
 .env
 .env.*

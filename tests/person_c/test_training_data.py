@@ -17,7 +17,7 @@ _SRC_DIR = Path(__file__).resolve().parent.parent
 if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
 
-from person_c.training_data import build_training_dataset
+from person_c.training_data import build_training_dataset, extract_X_y_metadata
 
 
 def _make_record(entity_id: str) -> Dict[str, Any]:
@@ -161,3 +161,92 @@ def test_no_negative_label_rejection(temp_gt_file):
     
     with pytest.raises(ValueError, match="negative label must exist"):
         build_training_dataset(s1_records, target_records, cand_pairs, temp_gt_file)
+
+
+def test_dict_ground_truth_and_extract_x_y_metadata():
+    """Test with in-memory dict ground truth and extract_X_y_metadata helper."""
+    gt_dict = {
+        "S1-100": {"S2-100", "S3-100"},
+        "S1-200": set()  # Empty matched_entity_ids
+    }
+    s1_records = [_make_record("S1-100"), _make_record("S1-200")]
+    target_records = [
+        _make_record("S2-100"),
+        _make_record("S3-100"),
+        _make_record("S2-999"),  # Negative candidate for S1-100
+        _make_record("S2-888"),  # Negative candidate for S1-200
+    ]
+    cand_pairs = pd.DataFrame([
+        {"source1_entity_id": "S1-100", "candidate_entity_ids": "S2-100,S3-100,S2-999"},
+        {"source1_entity_id": "S1-200", "candidate_entity_ids": "S2-888"},
+    ])
+
+    df = build_training_dataset(s1_records, target_records, cand_pairs, gt_dict)
+    assert len(df) == 4
+
+    X, y, metadata = extract_X_y_metadata(df)
+
+    # 1. Exact 45-feature X schema
+    from person_c.model import MODEL_FEATURES
+    assert list(X.columns) == MODEL_FEATURES
+    assert len(X.columns) == 45
+
+    # 2. Identifiers and labels excluded from X
+    assert "source1_entity_id" not in X.columns
+    assert "candidate_entity_id" not in X.columns
+    assert "label" not in X.columns
+
+    # 3. Label correctness
+    assert len(y) == 4
+    # S1-100 vs S2-100 -> 1
+    # S1-100 vs S3-100 -> 1
+    # S1-100 vs S2-999 -> 0
+    # S1-200 vs S2-888 -> 0 (empty matched_entity_ids in GT)
+    assert df[(df["source1_entity_id"] == "S1-100") & (df["candidate_entity_id"] == "S2-100")]["label"].values[0] == 1
+    assert df[(df["source1_entity_id"] == "S1-100") & (df["candidate_entity_id"] == "S3-100")]["label"].values[0] == 1
+    assert df[(df["source1_entity_id"] == "S1-100") & (df["candidate_entity_id"] == "S2-999")]["label"].values[0] == 0
+    assert df[(df["source1_entity_id"] == "S1-200") & (df["candidate_entity_id"] == "S2-888")]["label"].values[0] == 0
+
+    # 4. Metadata columns
+    assert list(metadata.columns) == ["source1_entity_id", "candidate_entity_id"]
+    assert len(metadata) == 4
+
+
+def test_deterministic_output(temp_gt_file):
+    """Calling build_training_dataset twice produces identical DataFrames."""
+    s1_records = [_make_record("S1-1")]
+    target_records = [_make_record("S2-1"), _make_record("S2-X")]
+    cand_pairs = pd.DataFrame([
+        {"source1_entity_id": "S1-1", "candidate_entity_ids": "S2-1,S2-X"}
+    ])
+
+    df1 = build_training_dataset(s1_records, target_records, cand_pairs, temp_gt_file)
+    df2 = build_training_dataset(s1_records, target_records, cand_pairs, temp_gt_file)
+
+    pd.testing.assert_frame_equal(df1, df2)
+
+
+def test_no_accidental_mutation_of_input_data(temp_gt_file):
+    """Input data structures are not mutated during dataset construction."""
+    s1_rec = _make_record("S1-1")
+    t1_rec = _make_record("S2-1")
+    t2_rec = _make_record("S2-X")
+    
+    s1_rec_copy = dict(s1_rec)
+    t1_rec_copy = dict(t1_rec)
+    t2_rec_copy = dict(t2_rec)
+
+    s1_records = [s1_rec]
+    target_records = [t1_rec, t2_rec]
+    cand_pairs = pd.DataFrame([
+        {"source1_entity_id": "S1-1", "candidate_entity_ids": "S2-1,S2-X"}
+    ])
+    cand_pairs_copy = cand_pairs.copy()
+
+    build_training_dataset(s1_records, target_records, cand_pairs, temp_gt_file)
+
+    assert s1_rec == s1_rec_copy
+    assert t1_rec == t1_rec_copy
+    assert t2_rec == t2_rec_copy
+    pd.testing.assert_frame_equal(cand_pairs, cand_pairs_copy)
+

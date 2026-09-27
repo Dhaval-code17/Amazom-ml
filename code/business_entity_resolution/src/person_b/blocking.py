@@ -29,6 +29,25 @@ from typing import Dict, List, Set, Any, Optional, Tuple
 from datasketch import MinHash, MinHashLSH
 
 
+# Stop words specific to the Person B token blocker to prevent indexing
+# generic noise tokens and known corrupted legal suffixes missed by Person A.
+BLOCKING_STOP_WORDS = frozenset({
+    "and", "the", "com", "co", "limittedd", "praaivett"
+})
+
+# Generic address words that are too common to be discriminative as blocking keys.
+# These are stripped before building the address signature so the key only contains
+# rare / location-specific tokens that carry real geographic signal.
+ADDRESS_NOISE_TOKENS = frozenset({
+    "street", "road", "lane", "avenue", "boulevard", "drive", "court",
+    "parkway", "square", "place", "highway", "building", "floor", "suite",
+    "unit", "apt", "apartment", "block", "sector", "plot", "near",
+    "district", "area", "zone", "phase", "no", "number",
+    "north", "south", "east", "west",
+    "office", "campus",
+})
+
+
 class MultiChannelBlocker:
     """
     Multi-Channel Candidate Generation Engine for Business Entity Resolution.
@@ -86,6 +105,12 @@ class MultiChannelBlocker:
         # Channel D Index: Weak Phonetic Index -> set[int_id]
         self.phonetic_index: Dict[str, Set[int]] = defaultdict(set)
 
+        # Channel E Index: Address Signature Blocking -> set[int_id]
+        # Keyed by a deterministic composite of 3 informative address tokens.
+        # Provides recall for cross-script / heavily transliterated entity names
+        # where name channels (A, B, D) and location channels (C) all fail.
+        self.address_index: Dict[str, Set[int]] = defaultdict(set)
+
     # ------------------------------------------------------------------
     # Internal ID mapping helpers
     # ------------------------------------------------------------------
@@ -112,7 +137,7 @@ class MultiChannelBlocker:
 
     def index_target_records(self, target_records: List[Dict[str, Any]]) -> None:
         """
-        Indexes Source 2 and Source 3 target records across all four blocking channels.
+        Indexes Source 2 and Source 3 target records across all five blocking channels.
 
         Args:
             target_records: List of normalized record dictionaries (produced by normalize_record)
@@ -122,6 +147,7 @@ class MultiChannelBlocker:
         self._build_lsh_index(target_records)
         self._build_location_indexes(target_records)
         self._build_phonetic_index(target_records)
+        self._build_address_index(target_records)
 
     # ------------------------------------------------------------------
     # Channel A: Name Token Inverted Index
@@ -157,6 +183,9 @@ class MultiChannelBlocker:
             unique_tokens = set(t.strip() for t in tokens if t and t.strip())
 
             for token in unique_tokens:
+                if token in BLOCKING_STOP_WORDS:
+                    continue
+                
                 posting = self.token_index[token]
                 # Cap posting list during indexing: once the list reaches max_posting_size,
                 # do not store further IDs. These mega-block tokens will be skipped at
@@ -266,6 +295,66 @@ class MultiChannelBlocker:
                 self.phonetic_index[phonetic].add(int_id)
 
     # ------------------------------------------------------------------
+    # Channel E: Address Signature Blocking
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _make_address_key(address_tokens: List[str]) -> str:
+        """
+        Produces a deterministic composite blocking key from a record's address tokens.
+
+        Strategy:
+        1. Strip well-known noisy/generic address words (ADDRESS_NOISE_TOKENS).
+        2. Keep only tokens with length >= 4 (single-char and very short tokens are useless).
+        3. Sort the remaining tokens alphabetically (order-invariant; also handles
+           address-component reordering such as city/locality token swaps).
+        4. Take the 3 lexicographically smallest informative tokens.
+        5. Join with '|' as a composite key.
+
+        Alphabetical selection (step 4) is deliberately chosen over length-based selection
+        to guard against long transliterated regional-script tail tokens (e.g. 'tmilllnaattu'
+        from Tamil Nadu) displacing stable shared tokens (e.g. 'andrews', 'church') and
+        causing key divergence between S1 and a genuine target record.
+        """
+        informative = sorted(
+            [
+                t for t in address_tokens
+                if t and len(t) >= 4 and t not in ADDRESS_NOISE_TOKENS
+            ]
+        )  # pure alphabetical sort — stable, order-invariant, noise-resistant
+        # Take the 3 lexicographically smallest tokens.
+        key_tokens = informative[:3]
+        if not key_tokens:
+            return ""
+        return "|".join(key_tokens)  # already sorted; no second sort needed
+
+    def _build_address_index(self, target_records: List[Dict[str, Any]]) -> None:
+        """
+        Internal implementation of Channel E: Address Signature Blocking Index.
+        Indexes target records by a composite key derived from informative address tokens.
+        Posting sets store integer IDs and are capped at max_posting_size.
+        """
+        self.address_index.clear()
+
+        for record in target_records:
+            entity_id = record.get("entity_id", "")
+            if not entity_id:
+                continue
+
+            address_tokens = record.get("address_tokens", [])
+            if not address_tokens:
+                continue
+
+            key = self._make_address_key(address_tokens)
+            if not key:
+                continue
+
+            int_id = self._intern_entity_id(entity_id)
+            posting = self.address_index[key]
+            if self.max_posting_size is None or len(posting) < self.max_posting_size:
+                posting.add(int_id)
+
+    # ------------------------------------------------------------------
     # Public query API — returns Set[str] of original string entity IDs
     # ------------------------------------------------------------------
 
@@ -287,6 +376,7 @@ class MultiChannelBlocker:
         int_candidates.update(self._get_lsh_candidates_int(s1_record))
         int_candidates.update(self._get_location_candidates_int(s1_record))
         int_candidates.update(self._get_phonetic_candidates_int(s1_record))
+        int_candidates.update(self._get_address_candidates_int(s1_record))
 
         # Translate back to string entity IDs before returning
         candidates = self._int_ids_to_strings(int_candidates)
@@ -320,6 +410,9 @@ class MultiChannelBlocker:
         unique_tokens = set(t.strip() for t in tokens if t and t.strip())
 
         for token in unique_tokens:
+            if token in BLOCKING_STOP_WORDS:
+                continue
+                
             posting_list = self.token_index.get(token)
             if posting_list:
                 # Safeguard for mega-blocks: skip tokens whose posting list
@@ -427,3 +520,35 @@ class MultiChannelBlocker:
     def _get_phonetic_candidates(self, s1_record: Dict[str, Any]) -> Set[str]:
         """Legacy string-returning wrapper for Channel D (backward compatibility)."""
         return self._int_ids_to_strings(self._get_phonetic_candidates_int(s1_record))
+
+    # ------------------------------------------------------------------
+    # Channel E retrieval
+    # ------------------------------------------------------------------
+
+    def _get_address_candidates_int(self, s1_record: Dict[str, Any]) -> Set[int]:
+        """
+        Internal retrieval for Channel E: Address Signature Blocking lookup.
+        Computes the same deterministic address key from the S1 record's address_tokens
+        and looks it up in address_index.
+        Returns a set of internal integer IDs.
+        """
+        address_tokens = s1_record.get("address_tokens", [])
+        if not address_tokens:
+            return set()
+
+        key = self._make_address_key(address_tokens)
+        if not key:
+            return set()
+
+        matches = self.address_index.get(key)
+        if not matches:
+            return set()
+
+        if self.max_posting_size is not None and len(matches) >= self.max_posting_size:
+            return set()
+
+        return set(matches)
+
+    def _get_address_candidates(self, s1_record: Dict[str, Any]) -> Set[str]:
+        """Legacy string-returning wrapper for Channel E (backward compatibility)."""
+        return self._int_ids_to_strings(self._get_address_candidates_int(s1_record))

@@ -1304,3 +1304,312 @@ def test_81_synthetic_before_after_behavioral_equivalence():
     # All returned IDs must be strings
     for cand in cands:
         assert isinstance(cand, str), f"Non-string candidate: {type(cand)}: {cand}"
+
+
+# =====================================================================
+# STAGE 3A ADDENDUM: TOKEN STOP-WORDS FILTERING TESTS
+# =====================================================================
+
+def test_82_stop_words_are_not_indexed():
+    """Test that tokens in BLOCKING_STOP_WORDS are skipped during indexing."""
+    from person_b.blocking import BLOCKING_STOP_WORDS
+    assert "and" in BLOCKING_STOP_WORDS
+    assert "com" in BLOCKING_STOP_WORDS
+    
+    target = {
+        "entity_id": "S2-82-TARGET",
+        "name_tokens_no_suffix": ["john", "and", "jane", "com"],
+        "name_tokens": ["john", "and", "jane", "com", "inc"]
+    }
+    blocker = MultiChannelBlocker()
+    blocker.index_target_records([target])
+    
+    assert "john" in blocker.token_index
+    assert "jane" in blocker.token_index
+    # "and" and "com" must be entirely absent from the token index
+    assert "and" not in blocker.token_index
+    assert "com" not in blocker.token_index
+
+def test_83_stop_words_are_not_queried():
+    """Test that query tokens in BLOCKING_STOP_WORDS do not attempt retrieval."""
+    target = {
+        "entity_id": "S2-83-TARGET",
+        "name_tokens_no_suffix": ["the", "limittedd", "acme", "praaivett"],
+        "name_tokens": ["the", "limittedd", "acme", "praaivett"]
+    }
+    blocker = MultiChannelBlocker()
+    blocker.index_target_records([target])
+    
+    query = {
+        "entity_id": "S1-83-QUERY",
+        "name_tokens_no_suffix": ["acme", "the", "and"],
+        "name_tokens": ["acme", "the", "and"]
+    }
+    cands = blocker._get_token_candidates_int(query)
+    # The int ID for the target should be retrieved via "acme" only.
+    int_id = blocker._entity_id_to_int["S2-83-TARGET"]
+    assert int_id in cands
+    
+    # Verify index doesn't have stop words
+    assert "the" not in blocker.token_index
+    assert "limittedd" not in blocker.token_index
+    assert "praaivett" not in blocker.token_index
+
+def test_84_corrupted_suffixes_excluded():
+    """Test that corrupted suffixes like 'limittedd' and 'praaivett' are blocked."""
+    target = {
+        "entity_id": "S2-84",
+        "name_tokens_no_suffix": ["tech", "limittedd", "praaivett"],
+        "name_tokens": ["tech", "limittedd", "praaivett"]
+    }
+    blocker = MultiChannelBlocker()
+    blocker.index_target_records([target])
+    
+    assert "tech" in blocker.token_index
+    assert "limittedd" not in blocker.token_index
+    assert "praaivett" not in blocker.token_index
+
+def test_85_valid_tokens_remain_functional():
+    """Test that candidate retrieval still works normally for valid tokens."""
+    target = {
+        "entity_id": "S2-85",
+        "name_tokens_no_suffix": ["global", "enterprises"],
+        "name_tokens": ["global", "enterprises"]
+    }
+    blocker = MultiChannelBlocker()
+    blocker.index_target_records([target])
+    
+    query = {
+        "entity_id": "S1-85",
+        "name_tokens_no_suffix": ["global", "co", "and"],
+    }
+    cands = blocker.get_candidates(query)
+    assert "S2-85" in cands
+
+def test_86_person_a_normalization_untouched():
+    """Test that Person A's normalize_record function still preserves these words."""
+    # Person B's blocker ignores 'and' and 'com', but normalize_record should STILL output them.
+    norm = normalize_record("John & Jane Com Pvt Ltd", "123 Main", "US")
+    # 'and' comes from '&' replacement, 'com' is preserved
+    assert "and" in norm["name_tokens_no_suffix"]
+    assert "com" in norm["name_tokens_no_suffix"]
+    # Pvt and Ltd should be removed by Person A
+    assert "pvt" not in norm["name_tokens_no_suffix"]
+    assert "ltd" not in norm["name_tokens_no_suffix"]
+
+
+# =====================================================================
+# CHANNEL E UNIT TESTS: ADDRESS SIGNATURE BLOCKING
+# =====================================================================
+
+def test_87_address_key_deterministic_order_invariant():
+    """Address key is identical regardless of token ordering."""
+    from person_b.blocking import MultiChannelBlocker
+    tokens_ab = ["kanyakumari", "manakudy", "andrews", "church", "street"]
+    tokens_ba = ["andrews", "street", "manakudy", "kanyakumari", "church"]
+    assert MultiChannelBlocker._make_address_key(tokens_ab) == MultiChannelBlocker._make_address_key(tokens_ba)
+
+
+def test_88_address_key_excludes_noise_tokens():
+    """Address key omits known generic tokens (street, office, campus, etc.)."""
+    from person_b.blocking import MultiChannelBlocker
+    tokens = ["street", "office", "campus", "kanyakumari", "manakudy", "andrews"]
+    key = MultiChannelBlocker._make_address_key(tokens)
+    # None of the noise tokens should appear in the key
+    for part in key.split("|"):
+        assert part not in ("street", "office", "campus")
+    # informative tokens must be present
+    assert "kanyakumari" in key or "manakudy" in key or "andrews" in key
+
+
+def test_89_address_key_at_most_3_tokens():
+    """Address key contains at most 3 tokens joined with '|'."""
+    from person_b.blocking import MultiChannelBlocker
+    tokens = ["kanyakumari", "manakudy", "andrews", "church", "parish", "counsel"]
+    key = MultiChannelBlocker._make_address_key(tokens)
+    assert len(key.split("|")) <= 3
+
+
+def test_90_address_key_empty_when_no_informative_tokens():
+    """Returns empty string when no tokens survive the noise filter."""
+    from person_b.blocking import MultiChannelBlocker
+    tokens = ["street", "road", "no", "near"]
+    key = MultiChannelBlocker._make_address_key(tokens)
+    assert key == ""
+
+
+def test_91_address_index_stores_integers():
+    """address_index posting lists store integer IDs, not strings."""
+    target = {
+        "entity_id": "S2-91",
+        "address_tokens": ["kanyakumari", "manakudy", "andrews", "church"],
+    }
+    blocker = MultiChannelBlocker()
+    blocker._build_address_index([target])
+    for posting in blocker.address_index.values():
+        for item in posting:
+            assert isinstance(item, int)
+
+
+def test_92_address_max_posting_size_enforced_at_index_time():
+    """Posting list is capped at max_posting_size during indexing."""
+    cap = 3
+    records = [
+        {
+            "entity_id": f"S2-92-{i}",
+            "address_tokens": ["kanyakumari", "manakudy", "andrews"],
+        }
+        for i in range(cap + 2)  # 5 records, should cap at 3
+    ]
+    blocker = MultiChannelBlocker(max_posting_size=cap)
+    blocker._build_address_index(records)
+    for posting in blocker.address_index.values():
+        assert len(posting) <= cap
+
+
+def test_93_address_channel_retrieves_candidate():
+    """A record matching on address tokens is retrieved via the address channel."""
+    target = {
+        "entity_id": "S2-93",
+        "address_tokens": ["kanyakumari", "manakudy", "andrews", "church"],
+        "name_tokens_no_suffix": ["completely", "different"],
+        "name_char_ngrams": [],
+        "city_guess": "somewhere_else",
+        "postal_code_guess": "",
+        "country": "India",
+        "name_phonetic": "KMPLTR",
+    }
+    blocker = MultiChannelBlocker()
+    blocker.index_target_records([target])
+
+    query = {
+        "entity_id": "S1-93",
+        "address_tokens": ["andrews", "church", "kanyakumari", "street"],
+        "name_tokens_no_suffix": ["shree", "foods"],
+        "name_char_ngrams": [],
+        "city_guess": "kanyakumari",
+        "postal_code_guess": "",
+        "country": "India",
+        "name_phonetic": "XRFTS",
+    }
+    cands = blocker.get_candidates(query)
+    assert "S2-93" in cands, "Address channel must retrieve candidate with matching address tokens"
+
+
+def test_94_exact_forensic_missed_pair_now_retrieved():
+    """
+    Validates the exact forensic missed pair using the REAL S3 address.
+    S3's address ends in Tamil 'தமிழ்நாடு' which unidecode produces as 'tmilllnaattu'.
+    Under the old longest-3 strategy that 12-char token displaced 'andrews' (7 chars),
+    causing key divergence. The new alphabetical-3 strategy must keep both keys identical.
+    """
+    s1_norm = normalize_record(
+        "Shree Foods Private Limited",
+        "St. Andrews Church Campus Parish Counsel Office, Manakudy, Kanyakumari, Tamil Nadu",
+        "India"
+    )
+    s1_norm["entity_id"] = "S1-934331427"
+
+    # Use the REAL S3 raw values — address ends in Tamil script for the state name
+    s3_norm = normalize_record(
+        "Shree Foods Private Limited",
+        "St. Andrews Church Campus Parish Counsel Office, Kanyakumari, Manakudy, \u0ba4\u0bae\u0bbf\u0bb4\u0bcd\u0ba8\u0bbe\u0b9f\u0bc1",  # Tamil Nadu in Tamil
+        "India"
+    )
+    s3_norm["entity_id"] = "S3-540347008"
+    s3_norm["name_tokens_no_suffix"] = ["srii", "hputts", "piraiveett", "limittett"]
+    s3_norm["name_tokens"] = ["srii", "hputts", "piraiveett", "limittett"]
+    s3_norm["name_char_ngrams"] = []
+    s3_norm["name_phonetic"] = "SRPTSPRFTLMTT"
+    s3_norm["aggressive_normalized_name"] = "srii hputts piraiveett limittett"
+
+    s1_key = MultiChannelBlocker._make_address_key(s1_norm.get("address_tokens", []))
+    s3_key = MultiChannelBlocker._make_address_key(s3_norm.get("address_tokens", []))
+    assert s1_key == s3_key, (
+        f"Keys must match.\n"
+        f"  S1 address_tokens: {s1_norm.get('address_tokens')}\n"
+        f"  S3 address_tokens: {s3_norm.get('address_tokens')}\n"
+        f"  S1 key: {s1_key}\n"
+        f"  S3 key: {s3_key}"
+    )
+
+    blocker = MultiChannelBlocker()
+    blocker.index_target_records([s3_norm])
+    cands = blocker.get_candidates(s1_norm)
+    assert "S3-540347008" in cands, (
+        "Channel E must retrieve the Tamil-transliterated target via shared address tokens."
+    )
+
+
+def test_95_address_channel_no_false_recall_on_empty_address():
+    """Records with no address tokens do not appear in address_index and don't match."""
+    target_no_addr = {
+        "entity_id": "S2-95-NOADDR",
+        "address_tokens": [],
+        "name_tokens_no_suffix": ["alpha"],
+        "name_char_ngrams": [],
+        "city_guess": "",
+        "postal_code_guess": "",
+        "country": "US",
+        "name_phonetic": "",
+    }
+    blocker = MultiChannelBlocker()
+    blocker.index_target_records([target_no_addr])
+
+    query = {
+        "entity_id": "S1-95",
+        "address_tokens": ["kanyakumari", "manakudy", "andrews"],
+        "name_tokens_no_suffix": ["beta"],
+        "name_char_ngrams": [],
+        "city_guess": "",
+        "postal_code_guess": "",
+        "country": "US",
+        "name_phonetic": "",
+    }
+    cands = blocker.get_candidates(query)
+    assert "S2-95-NOADDR" not in cands
+
+
+def test_96_address_key_stable_against_regional_script_tail_tokens():
+    """
+    Regression for the exact failure mode: a long transliterated regional-script token
+    (e.g. 'tmilllnaattu' from Tamil Nadu in Tamil script) must NOT displace stable shared
+    tokens (e.g. 'andrews') from the 3-token composite key.
+
+    S1-like tokens: address ends in 'tamil', 'nadu' (both short / filtered)
+    S3-like tokens: address ends in 'tmilllnaattu' (long transliteration)
+
+    Both must produce the identical composite key.
+    """
+    s1_tokens = [
+        "street", "andrews", "church", "campus", "parish",
+        "counsel", "office", "manakudy", "kanyakumari", "tamil", "nadu"
+    ]
+    s3_tokens = [
+        "street", "andrews", "church", "campus", "parish",
+        "counsel", "office", "kanyakumari", "manakudy", "tmilllnaattu"
+    ]
+    s1_key = MultiChannelBlocker._make_address_key(s1_tokens)
+    s3_key = MultiChannelBlocker._make_address_key(s3_tokens)
+
+    assert s1_key == s3_key, (
+        f"Keys must match to avoid missing cross-script matches.\n"
+        f"  S1 key: {s1_key}\n"
+        f"  S3 key: {s3_key}"
+    )
+    # Specifically: 'andrews' must appear in key; 'tmilllnaattu' must not
+    assert "andrews" in s3_key, "'andrews' must be in key — it is a shared discriminative token"
+    assert "tmilllnaattu" not in s3_key, "long transliterated tail token must be excluded from key"
+
+
+def test_97_address_key_exact_value_alphabetical():
+    """Exact key value check: alphabetically first 3 tokens are selected."""
+    # After filtering noise and short tokens from the S1-like set:
+    # remaining: ['andrews', 'church', 'counsel', 'kanyakumari', 'manakudy', 'parish']
+    # alphabetical first 3 → 'andrews', 'church', 'counsel'
+    tokens = [
+        "street", "andrews", "church", "campus", "parish",
+        "counsel", "office", "manakudy", "kanyakumari", "tamil", "nadu"
+    ]
+    key = MultiChannelBlocker._make_address_key(tokens)
+    assert key == "andrews|church|counsel", f"Expected 'andrews|church|counsel', got '{key}'"

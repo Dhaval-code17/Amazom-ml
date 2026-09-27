@@ -75,7 +75,7 @@ def test_stream_and_normalize_chunks(synthetic_data_dir):
     assert chunks[0][0]["entity_id"] == "S2-A1"
 
 
-def test_chunked_benchmark_end_to_end(synthetic_data_dir):
+def test_chunked_benchmark_end_to_end(synthetic_data_dir, tmp_path):
     """
     Verifies that run_chunked_benchmark retrieves candidates correctly 
     across chunks and computes true recall without leaking ground truth.
@@ -86,7 +86,9 @@ def test_chunked_benchmark_end_to_end(synthetic_data_dir):
         chunk_size=2,
         sample_size=2,
         random_seed=42,
-        max_chunks=None
+        max_chunks=None,
+        checkpoint_file=tmp_path / "ckpt.json",
+        reset_checkpoint=True,
     )
     
     # Metrics assertions
@@ -107,7 +109,39 @@ def test_chunked_benchmark_end_to_end(synthetic_data_dir):
     assert results["avg_cands"] == 1.5
 
 
-def test_max_chunks_limit(synthetic_data_dir):
+def test_load_sampled_s1_records_deterministic(synthetic_data_dir):
+    """Verifies that load_sampled_s1_records loads exactly the requested sample size deterministically."""
+    from person_c.smoke_test_real_data import load_sampled_s1_records
+    s1_path = synthetic_data_dir / "train_source1.tsv"
+    
+    # We have 2 records in S1. Sample size 1 with seed 42 should always return the same record.
+    sample1 = load_sampled_s1_records(s1_path, sample_size=1, random_seed=42)
+    sample2 = load_sampled_s1_records(s1_path, sample_size=1, random_seed=42)
+    
+    assert len(sample1) == 1
+    assert len(sample2) == 1
+    assert sample1[0]["entity_id"] == sample2[0]["entity_id"]
+    # Verify it is normalized
+    assert "name_tokens" in sample1[0]
+
+def test_load_sampled_s1_records_missing_file(synthetic_data_dir):
+    """Verifies that missing files are handled safely and return an empty list."""
+    from person_c.smoke_test_real_data import load_sampled_s1_records
+    s1_path = synthetic_data_dir / "non_existent.tsv"
+    sample = load_sampled_s1_records(s1_path, sample_size=1, random_seed=42)
+    assert sample == []
+
+def test_load_sampled_s1_records_all_normalized_if_requested(synthetic_data_dir):
+    """Verifies that all records are loaded if sample_size >= total records."""
+    from person_c.smoke_test_real_data import load_sampled_s1_records
+    s1_path = synthetic_data_dir / "train_source1.tsv"
+    sample = load_sampled_s1_records(s1_path, sample_size=10, random_seed=42)
+    assert len(sample) == 2
+    # Verify both are normalized
+    for rec in sample:
+        assert "name_tokens" in rec
+
+def test_max_chunks_limit(synthetic_data_dir, tmp_path):
     """Verifies that --max-chunks development mode limits processing."""
     # S2 has 3 rows. Chunk size 1 -> 3 chunks normally. 
     # Max chunks 1 -> should only process 1 row from S2 and 1 row from S3.
@@ -116,8 +150,83 @@ def test_max_chunks_limit(synthetic_data_dir):
         chunk_size=1,
         sample_size=2,
         random_seed=42,
-        max_chunks=1
+        max_chunks=1,
+        checkpoint_file=tmp_path / "ckpt_max.json",
+        reset_checkpoint=True
     )
     
     # Only 1 chunk of size 1 per file -> 2 targets processed total
     assert results["total_targets_processed"] == 2
+
+
+def test_checkpoint_and_resume(synthetic_data_dir, tmp_path):
+    """
+    Verifies resumable checkpoint mechanism:
+    1. Interruption simulation via max_chunks.
+    2. Checkpoint JSON is created with partial state.
+    3. Restarting loads checkpoint, skips completed chunks, and produces exact same results as uninterrupted run.
+    """
+    ckpt_file = tmp_path / "test_ckpt.json"
+
+    # Step 1: Run full uninterrupted benchmark for baseline truth
+    full_results = run_chunked_benchmark(
+        data_dir=synthetic_data_dir,
+        chunk_size=1,
+        sample_size=2,
+        random_seed=42,
+        max_chunks=None,
+        checkpoint_file=tmp_path / "baseline_ckpt.json",
+        reset_checkpoint=True,
+    )
+
+    # Step 2: Run interrupted benchmark (max_chunks=1)
+    partial_results = run_chunked_benchmark(
+        data_dir=synthetic_data_dir,
+        chunk_size=1,
+        sample_size=2,
+        random_seed=42,
+        max_chunks=1,
+        checkpoint_file=ckpt_file,
+        reset_checkpoint=True,
+    )
+
+    assert ckpt_file.exists()
+    import json
+    with open(ckpt_file, "r") as f:
+        ckpt_data = json.load(f)
+
+    assert "sources" in ckpt_data
+    assert ckpt_data["sources"]["train_source2.tsv"]["completed"] is False
+    assert ckpt_data["sources"]["train_source2.tsv"]["chunks_completed"] == 1
+
+    # Step 3: Resume benchmark without max_chunks limit
+    resumed_results = run_chunked_benchmark(
+        data_dir=synthetic_data_dir,
+        chunk_size=1,
+        sample_size=2,
+        random_seed=42,
+        max_chunks=None,
+        checkpoint_file=ckpt_file,
+        reset_checkpoint=False,
+    )
+
+    # Verify resumed run matches full uninterrupted baseline
+    assert resumed_results["total_targets_processed"] == full_results["total_targets_processed"]
+    assert resumed_results["total_true"] == full_results["total_true"]
+    assert resumed_results["true_retrieved"] == full_results["true_retrieved"]
+    assert resumed_results["recall"] == full_results["recall"]
+
+    # Step 4: Run again to verify fully completed checkpoint is skipped without duplicating results
+    skipped_results = run_chunked_benchmark(
+        data_dir=synthetic_data_dir,
+        chunk_size=1,
+        sample_size=2,
+        random_seed=42,
+        max_chunks=None,
+        checkpoint_file=ckpt_file,
+        reset_checkpoint=False,
+    )
+
+    assert skipped_results["total_targets_processed"] == full_results["total_targets_processed"]
+    assert skipped_results["recall"] == full_results["recall"]
+
